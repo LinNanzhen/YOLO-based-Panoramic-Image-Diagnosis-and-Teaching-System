@@ -18,7 +18,7 @@ winter_dataset/
 annotated_presets/
 
 # 大体积数据集（不入库：pretrain/ 为 Roboflow 导出可重下载，
-# images/ 为旧管线数据，preview/ 为 auto_annotate 的质检预览图）
+# /images/ 为旧管线数据（仅根目录，勿误伤 dataset/images/），preview/ 为质检预览图）
 pretrain/
-images/
+/images/
 preview/
