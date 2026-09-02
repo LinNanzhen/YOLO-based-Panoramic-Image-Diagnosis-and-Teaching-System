@@ -1,0 +1,7 @@
+# 用户标注的 YOLO 标签使用 CR 换行符，禁止 git 做任何行尾转换
+dataset/labels/** -text
+
+# 二进制文件不做行尾转换
+*.pt -text
+*.jpg -text
+*.png -text

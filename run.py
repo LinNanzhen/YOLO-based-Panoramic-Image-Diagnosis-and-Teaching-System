@@ -14,21 +14,18 @@ def check_package(display_name, import_name):
     except Exception:
         # 忽略部分导入错误
         pass
-    
+
     print(f"❌ {display_name} 未安装")
     return False
 
 def check_and_install_requirements():
-    """检查依赖并从清华源安装"""
-    
-    # 1. 询问用户
-    choice = input("是否检查并安装依赖包? (y/n, 默认: y): ").strip().lower()
-    if choice and choice != 'y':
-        print("已跳过依赖检查。")
-        return
+    """检查依赖；只有发现缺失时才询问是否安装。
+
+    镜像用阿里云源（默认 pypi.org 与清华源在当前网络下经常不可达）。
+    """
 
     print("检查依赖环境...")
-    
+
     # 定义需要检查的库
     # 格式: (显示名称, 导入名称, pip安装包名)
     requirements = [
@@ -40,38 +37,43 @@ def check_and_install_requirements():
         ("numpy", "numpy", "numpy"),
         ("matplotlib", "matplotlib", "matplotlib"),
         ("streamlit", "streamlit", "streamlit"), # 必须检查
-        ("plotly", "plotly", "plotly") 
+        ("plotly", "plotly", "plotly")
     ]
-    
+
     packages_to_install = []
-    
-    # 2. 遍历检查
+
+    # 1. 遍历检查
     for display_name, import_name, package_name in requirements:
         if not check_package(display_name, import_name):
             packages_to_install.append(package_name)
-            
-    # 3. 安装缺失项
-    if packages_to_install:
-        print(f"\n检测到 {len(packages_to_install)} 个缺失的库，准备从清华源镜像安装...")
-        print(f"缺失列表: {', '.join(packages_to_install)}")
-        print("-" * 50)
-        
-        # 清华源地址
-        mirror_url = "https://pypi.tuna.tsinghua.edu.cn/simple"
-        
-        # 构建 pip 命令
-        cmd = [sys.executable, "-m", "pip", "install"] + packages_to_install + ["-i", mirror_url]
-        
-        try:
-            print(f"正在执行安装命令...")
-            subprocess.check_call(cmd)
-            print("\n✅ 所有依赖安装完成！")
-        except subprocess.CalledProcessError:
-            print("\n❌ 安装失败。建议手动运行以下命令安装:")
-            print(f"pip install {' '.join(packages_to_install)} -i {mirror_url}")
-            sys.exit(1)
-    else:
+
+    # 2. 全部就绪则直接返回
+    if not packages_to_install:
         print("\n✅ 环境完美，所有依赖已就绪！")
+        print("="*60)
+        return
+
+    # 3. 有缺失项时才询问
+    print(f"\n检测到 {len(packages_to_install)} 个缺失的库: {', '.join(packages_to_install)}")
+    choice = input("是否从阿里云镜像安装? (y/n, 默认: y): ").strip().lower()
+    if choice and choice != 'y':
+        print("已跳过安装。")
+        return
+
+    mirror_url = "https://mirrors.aliyun.com/pypi/simple/"
+    print("-" * 50)
+
+    # 构建 pip 命令
+    cmd = [sys.executable, "-m", "pip", "install"] + packages_to_install + ["-i", mirror_url]
+
+    try:
+        print(f"正在执行安装命令...")
+        subprocess.check_call(cmd)
+        print("\n✅ 所有依赖安装完成！")
+    except subprocess.CalledProcessError:
+        print("\n❌ 安装失败。建议手动运行以下命令安装:")
+        print(f"pip install {' '.join(packages_to_install)} -i {mirror_url}")
+        sys.exit(1)
     print("="*60)
 
 def run_app():
@@ -79,11 +81,11 @@ def run_app():
     print("\n" + "="*60)
     print("🦷 牙科 AI 教学平台正在启动...")
     print("="*60)
-    
+
     # 获取 web_ui.py 路径
     current_dir = os.path.dirname(os.path.abspath(__file__))
     app_path = os.path.join(current_dir, "web_ui.py")
-    
+
     if not os.path.exists(app_path):
         print(f"❌ 错误: 找不到 {app_path}")
         print("请确保 web_ui.py 与 run.py 在同一目录下")
@@ -91,14 +93,14 @@ def run_app():
 
     # 默认端口
     port = "8501"
-    
+
     print(f"🚀 服务即将启动！")
     print(f"🌍 请在浏览器访问提供的 Network URL (通常是 http://<云服务器IP>:{port})")
     print("="*60)
-    
+
     # 启动 Streamlit
     cmd = [sys.executable, "-m", "streamlit", "run", app_path, "--server.port", port, "--server.address", "0.0.0.0"]
-    
+
     try:
         subprocess.run(cmd)
     except KeyboardInterrupt:
