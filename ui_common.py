@@ -4,12 +4,26 @@ ui_common.py — 各页面（page_*.py）共享的样式与 UI 部件
 
 包含：科技风全局 CSS、权重扫描、训练指标读取，以及两个诊断页共用的
 「上传图片 + 置信度滑条 + 原图预览」卡片。
+
+仓库内资源路径一律基于 dental_common.REPO_ROOT（由文件位置推导），不用相对
+路径字面量 —— 后者在 streamlit 从非仓库根目录启动时会静默解析失败。
+dental_common 同时设置 KMP_DUPLICATE_LIB_OK，须先于 ultralytics 导入；
+web_ui 的导入顺序（page_diagnose → ui_common 早于 page_train → ultralytics）
+已天然满足。
 """
 from pathlib import Path
+
+import inspect
+import json
 
 import pandas as pd
 import streamlit as st
 from PIL import Image
+
+from dental_common import DEMO_WEIGHTS_DIR, RUNS_DIR, WINTER_RUNS_DIR
+
+# page_diagnose 与 page_monitor 共用的旧版检测训练产物目录
+DEFAULT_DETECT_RUNS_DIR = RUNS_DIR / "detect" / "results"
 
 # ==================== 科技风 CSS ====================
 _CSS = """
@@ -322,6 +336,23 @@ def render_css():
 
 
 # ==================== 共享辅助函数 ====================
+# st.image 的"撑满列宽"参数在 streamlit 1.42 改了名：
+# use_column_width → use_container_width。本机装的是 requirements.txt 里 pin 的
+# 1.30.0（只认旧名，传新名直接 TypeError），而云上 code-server 环境可能装的是新版
+# （传旧名会弹弃用横幅）。按当前签名挑名字，两边都不用改代码。
+_IMAGE_WIDTH_KWARG = next(
+    (name for name in ("use_container_width", "use_column_width")
+     if name in inspect.signature(st.image).parameters),
+    None,
+)
+
+
+def show_image(image, caption=None):
+    """st.image 的版本无关包装：始终撑满容器宽度。"""
+    kwargs = {_IMAGE_WIDTH_KWARG: True} if _IMAGE_WIDTH_KWARG else {}
+    st.image(image, caption=caption, **kwargs)
+
+
 def get_best_weights(output_dir):
     """递归查找所有 best.pt 文件，返回 [(相对路径显示名, 绝对路径)]（新者优先）。"""
     weights = []
@@ -376,6 +407,82 @@ def find_all_runs(output_dir):
     return sorted(runs, key=lambda x: x["mtime"], reverse=True)
 
 
+def load_metrics_json(path):
+    """安全读取实验 metrics.json，失败返回空 dict。"""
+    try:
+        p = Path(path)
+        if p.is_file():
+            return json.loads(p.read_text(encoding="utf-8"))
+    except Exception:
+        pass
+    return {}
+
+
+def list_winter_experiments(roots=None):
+    """扫描 Winter 实验目录（<exp>-detect / <exp>-cls-angulation 成对）。
+
+    roots 默认同时包含两处：
+      - runs/winter   用户自己微调的产物（.gitignore，新克隆时不存在）
+      - weights/demo  随仓库提交的教师演示权重 expB（保证开箱即用）
+    顺序即优先级：同名实验保留先出现的（本地训练覆盖内置演示）。
+
+    返回按最近修改倒序的 list[dict]:
+        exp / det_path / cls_path（best.pt 绝对路径或 None）/ mAP50 / top1 /
+        mtime / root / is_demo
+    目录都不存在时返回空列表；仅供展示，不抛异常。
+    """
+    if roots is None:
+        roots = [WINTER_RUNS_DIR, DEMO_WEIGHTS_DIR]
+    elif isinstance(roots, (str, Path)):
+        roots = [roots]
+
+    exp_map = {}
+    suffixes = ("-detect", "-cls-angulation")
+    for root in roots:
+        root = Path(root)
+        if not root.is_dir():
+            continue
+        for d in root.iterdir():
+            if not d.is_dir():
+                continue
+            name = d.name
+            for suffix in suffixes:
+                if not name.endswith(suffix):
+                    continue
+                e = name[:-len(suffix)]
+                if e in exp_map:
+                    continue
+                exp_map[e] = {
+                    "exp": e, "det_path": None, "cls_path": None,
+                    "mAP50": None, "top1": None, "mtime": d.stat().st_mtime,
+                    "root": root, "is_demo": root == DEMO_WEIGHTS_DIR,
+                }
+                break
+
+        for e, entry in exp_map.items():
+            if entry["root"] != root:
+                continue
+            for suffix in suffixes:
+                w = root / f"{e}{suffix}" / "weights" / "best.pt"
+                d = root / f"{e}{suffix}"
+                if not d.is_dir():
+                    continue
+                entry["mtime"] = max(entry["mtime"], d.stat().st_mtime)
+                if w.is_file():
+                    if suffix == "-detect":
+                        entry["det_path"] = str(w)
+                    else:
+                        entry["cls_path"] = str(w)
+            m = load_metrics_json(root / e / "metrics.json")
+            if "mAP50" in m:
+                entry["mAP50"] = m.get("mAP50")
+            ang = m.get("angulation") or {}
+            if "top1" in ang:
+                entry["top1"] = ang.get("top1")
+
+    return sorted(exp_map.values(), key=lambda x: x["mtime"], reverse=True)
+
+
 def upload_with_preview(title, uploader_label, uploader_key,
                         slider_label, slider_min, slider_max, slider_value,
                         slider_help, preview_caption):
@@ -396,8 +503,7 @@ def upload_with_preview(title, uploader_label, uploader_key,
                      help=slider_help)
 
     if uploaded_file is not None:
-        st.image(Image.open(uploaded_file), caption=preview_caption,
-                 use_container_width=True)
+        show_image(Image.open(uploaded_file), caption=preview_caption)
 
     st.markdown('</div>', unsafe_allow_html=True)
     return uploaded_file, conf

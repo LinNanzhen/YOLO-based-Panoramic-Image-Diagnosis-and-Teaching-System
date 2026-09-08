@@ -86,7 +86,9 @@ python scripts/finetune_winter.py --mode all --init pretrain \
 
 - 训练页「预训练权重来源」选择「域内预训练 (pretrain 数据集)」或填自定义路径，
   即可在 web 界面用预训练权重微调。
-- 智能诊断页加载 `runs/winter/expB*/weights/best.pt` 即可课堂演示。
+- 智能诊断页会同时扫描 `runs/winter/` 与随仓库提交的 `weights/demo/`，因此
+  **新克隆的仓库不跑任何训练也能直接课堂演示**（内置 expB：检测 mAP50 0.994 /
+  角度 top1 0.948）；本机训练出的同名实验优先级更高，会覆盖内置演示。
 - 完整 Winter 结论（如 "II-B 近中阻生"）由检测框 + 三个分类器的输出组合得到，
   课堂演示可用脚本把三者合并显示（见下方示例）。
 

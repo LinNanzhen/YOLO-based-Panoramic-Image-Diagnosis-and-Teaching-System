@@ -1,0 +1,42 @@
+# 牙科 AI 教学平台依赖清单
+#
+# 版本取自 2026-09-01 实测可复现 docs/experiment_report.md 全部指标的环境
+# （Windows + RTX 4060 Laptop 8GB）。锁版本的原因：ultralytics 的 data.yaml
+# 语义、metrics 字段名和 API 在小版本间会变，换版本可能让页面读指标静默拿到 None。
+#
+# CUDA 版 torch/torchvision 需从官方 index 安装，pip 默认源只有 CPU 轮子：
+#   pip install torch==2.7.1 torchvision==0.22.1 --index-url https://download.pytorch.org/whl/cu126
+# 固定号 2.7.1 按 PEP 440 可匹配已装的 2.7.1+cu126，不会误报版本不符。
+# 纯 CPU 环境直接 pip install -r requirements.txt 即可。
+
+# --- 深度学习 ---
+torch==2.7.1
+torchvision==0.22.1
+ultralytics==8.3.233
+
+# --- Web 界面 ---
+streamlit==1.30.0
+plotly==5.9.0
+
+# --- 图像与数值 ---
+opencv-python==4.11.0.86
+Pillow==11.3.0
+numpy==1.26.4
+
+# --- 图表与指标 ---
+matplotlib==3.10.1
+pandas==2.3.3
+scipy==1.11.4
+seaborn==0.12.2
+
+# --- 工具 ---
+PyYAML==6.0.1
+psutil==5.9.0
+
+# 无界面服务器（Linux/云 GPU）可改用 headless 版，避免依赖 X11：
+#   pip uninstall opencv-python && pip install opencv-python-headless==4.11.0.86
+
+# --- 开发/测试（可选）---
+# tests/ 用的 pytest 故意注释掉：run.py 只安装未注释的条目，学生端不需要测试框架。
+# 要改代码的人自己装：pip install pytest==8.4.2（本套件即在 8.4.2 上验证通过）
+# pytest==8.4.2

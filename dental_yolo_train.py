@@ -4,6 +4,13 @@ if not hasattr(np.concatenate, '__wrapped__'):
     _old_concat = np.concatenate
     np.concatenate = lambda arrs, axis=0, out=None, **kw: _old_concat(arrs, axis=axis, out=out)
 import os
+
+# 必须早于 ultralytics/torch 导入：Anaconda 的 MKL 与 torch 各带一份
+# libiomp5md.dll，不设此变量时 DataLoader 子进程会抛 OMP: Error #15 中止。
+os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
+
+import random
+import shutil
 import sys
 from pathlib import Path
 from datetime import datetime
@@ -12,6 +19,13 @@ from ultralytics import YOLO
 import matplotlib.pyplot as plt
 from matplotlib.patches import Rectangle
 import json
+
+# 由本文件位置推导，与运行时 CWD 无关；仓库根目录内置了 yolov8n.pt 等 COCO 权重
+REPO_ROOT = Path(__file__).resolve().parent
+
+# device=-1（CPU）时 ultralytics 会把 CUDA_VISIBLE_DEVICES 写成 ""，不还原的话
+# 同一 Streamlit 进程里后续页面的 GPU 推理会全部报 Invalid device id
+from dental_common import preserve_cuda_visible_devices
 
 class DataValidator:
     """数据目录与标签格式验证"""
@@ -117,19 +131,27 @@ class DentalYOLOPipeline:
         return colors
 
     def __init__(self, data_root, label_root, output_dir, pretrained_weights,
-                 model_size='nano', class_names=None):
+                 model_size='nano', class_names=None, test_label_root=None,
+                 val_ratio=0.15, seed=42):
         """
         初始化流程
         
         Args:
-            data_root: 图像根目录
-            label_root: 标签根目录
+            data_root: 图像根目录（内含 trainset/ 与 testset/）
+            label_root: 训练标签目录（扁平存放 .txt，与 trainset 图像同名配对）
             output_dir: 输出目录
-            model_size: nano/small/medium
+            model_size: nano/small/medium（也接受 n/s/m）
+            test_label_root: 测试集标签目录（可选）。缺失时不生成 test 切分，
+                             testset 仅用于 evaluate_and_visualize 的可视化
+            val_ratio: 从 trainset 中划出验证集的比例
+            seed: 划分随机种子，保证同一数据集每次切分一致
         """
         self.data_root = Path(data_root)
         self.label_root = Path(label_root)
         self.output_dir = Path(output_dir)
+        self.test_label_root = Path(test_label_root) if test_label_root else None
+        self.val_ratio = val_ratio
+        self.seed = seed
         self.trainset_dir = self.data_root / "trainset"
         self.testset_dir = self.data_root / "testset"
         self.model_size = model_size
@@ -183,40 +205,73 @@ class DentalYOLOPipeline:
         print(f"YOLOv8{self.model_size.upper()} 训练开始")
         print("=" * 60)
         
-        # 创建YAML格式数据配置
-        yaml_content = self._create_dataset_yaml()
+        # 物化 images/{train,val} + labels/{train,val} 目录树并生成 data.yaml
+        dataset_root, split_stats = self._prepare_split()
+        yaml_content = self._build_dataset_yaml(dataset_root, split_stats["n_test"] > 0)
         yaml_path = self.results_subdir / "dataset.yaml"
-        with open(yaml_path, 'w') as f:
+        with open(yaml_path, 'w', encoding='utf-8') as f:
             f.write(yaml_content)
-        
+
+        print("✓ 数据集切分完成（验证集与训练集不相交）:")
+        print(f"    train: {split_stats['n_train']} 张")
+        print(f"    val  : {split_stats['n_val']} 张  (val_ratio={self.val_ratio}, seed={self.seed})")
+        if split_stats["n_test"]:
+            print(f"    test : {split_stats['n_test']} 张")
+        elif self.test_label_root is None:
+            print("    test : 未生成（未提供测试集标签，testset 仅用于可视化）")
+        else:
+            print(f"    test : 未生成（{self.test_label_root} 下配不到同名标签）")
+        if split_stats["missing_train_labels"]:
+            n_miss = len(split_stats["missing_train_labels"])
+            print(f"    ⚠ {n_miss} 张训练图像缺标签，已跳过: "
+                  f"{', '.join(split_stats['missing_train_labels'][:5])}"
+                  + (" ..." if n_miss > 5 else ""))
         print(f"✓ 数据配置文件已创建: {yaml_path}\n")
+
+        self.training_log['config']['split'] = {
+            'dataset_root': str(dataset_root),
+            'n_train': split_stats['n_train'],
+            'n_val': split_stats['n_val'],
+            'n_test': split_stats['n_test'],
+            'val_ratio': self.val_ratio,
+            'seed': self.seed,
+            'missing_train_labels': split_stats['missing_train_labels'],
+        }
         
         if self.pretrained_weights and Path(self.pretrained_weights).exists():
             print(f"✓ 使用指定的本地预训练权重: {self.pretrained_weights}")
-            self.model = YOLO(self.pretrained_weights)
+            self.model = YOLO(str(self.pretrained_weights))
         else:
-            # 如果没有提供路径或路径无效，则回退到默认行为
-            model_name = f"yolov8{self.model_size}.pt"
-            print(f"⚠️ 未指定或未找到本地权重，将使用默认模型: {model_name} (可能需要下载)")
-            self.model = YOLO(model_name)
+            # model_size 是 nano/small/medium，直接拼会得到 yolov8nano.pt 这种非法名
+            model_name = f"yolov8{self._size_letter()}.pt"
+            local = REPO_ROOT / model_name
+            if self.pretrained_weights:
+                print(f"⚠️ 指定的权重不存在: {self.pretrained_weights}")
+            if local.is_file():
+                print(f"✓ 回退到仓库内置 COCO 权重: {local}")
+                self.model = YOLO(str(local))
+            else:
+                print(f"⚠️ 本地无 {model_name}，将尝试联网下载（离线环境会失败）")
+                self.model = YOLO(model_name)
         
         # 训练
         print(f"{'Epoch':<8} {'Loss':<12} {'Class':<12} {'Images':<10} {'Instances':<12}")
         print("-" * 60)
         
-        results = self.model.train(
-            data=str(yaml_path),
-            epochs=epochs,
-            batch=batch_size,
-            patience=patience if patience > 0 else 999,  # 高值禁用早停
-            lr0=lr0,
-            device=device if device >= 0 else 'cpu',
-            verbose=False,
-            save=True,
-            project=str(self.output_dir),
-            name=self.results_subdir.name,
-            exist_ok=True
-        )
+        with preserve_cuda_visible_devices():
+            results = self.model.train(
+                data=str(yaml_path),
+                epochs=epochs,
+                batch=batch_size,
+                patience=patience if patience > 0 else 999,  # 高值禁用早停
+                lr0=lr0,
+                device=device if device >= 0 else 'cpu',
+                verbose=False,
+                save=True,
+                project=str(self.output_dir),
+                name=self.results_subdir.name,
+                exist_ok=True
+            )
         
         self.training_log['end_time'] = datetime.now().isoformat()
         self.training_log['final_metrics'] = {
@@ -269,8 +324,9 @@ class DentalYOLOPipeline:
             print(f"[{idx}/{len(test_images)}] 处理: {img_path.name}")
             
             # 推理
-            results = self.model.predict(source=str(img_path), conf=confidence_threshold, 
-                                        verbose=False)
+            with preserve_cuda_visible_devices():
+                results = self.model.predict(source=str(img_path), conf=confidence_threshold,
+                                             verbose=False)
             result = results[0]
             
             # 读取原始图像
@@ -341,22 +397,102 @@ class DentalYOLOPipeline:
         print("=" * 60)
         print()
     
-    def _create_dataset_yaml(self):
-        """创建YAML格式的数据集配置"""
+    def _size_letter(self):
+        """把 nano/small/medium 归一化成 ultralytics 认的 n/s/m。"""
+        m = str(self.model_size).strip().lower()
+        return {"nano": "n", "small": "s", "medium": "m"}.get(m, m[0] if m else "n")
+
+    @staticmethod
+    def _link_or_copy(src: Path, dst: Path):
+        """优先硬链接（同卷、零额外磁盘占用），跨卷或文件系统不支持时回退复制。"""
+        if dst.exists():
+            return
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            os.link(str(src), str(dst))
+        except (OSError, NotImplementedError, AttributeError):
+            shutil.copy2(str(src), str(dst))
+
+    def _collect_pairs(self, image_dir: Path, label_dir: Path):
+        """配对图像与同名 .txt 标签，返回 (pairs, 缺标签的图像名列表)。"""
+        exts = {'.jpg', '.jpeg', '.png', '.bmp', '.tiff'}
+        pairs, missing = [], []
+        if not image_dir.is_dir():
+            return pairs, missing
+        for img in sorted(image_dir.iterdir()):
+            if not img.is_file() or img.suffix.lower() not in exts:
+                continue
+            lab = label_dir / f"{img.stem}.txt"
+            if lab.is_file():
+                pairs.append((img, lab))
+            else:
+                missing.append(img.name)
+        return pairs, missing
+
+    def _prepare_split(self):
+        """把 trainset/ + 扁平 label_root 物化成 ultralytics 需要的目录树。
+
+        产出 <results_subdir>/_dataset/{images,labels}/{train,val[,test]}，
+        返回 (dataset_root, 统计信息 dict)。
+
+        必须物化而不能只写 data.yaml：ultralytics 定位标签的方式是把图片路径中
+        最后一段 /images/ 替换为 /labels/。本项目图片在 <data_root>/trainset/、
+        标签在独立的扁平目录，路径里没有 /images/ 段，替换是空操作，训练会读到
+        零个标签且不报错（各类 AP 恒为 0）。
+        """
+        root = self.results_subdir / "_dataset"
+        if root.exists():
+            shutil.rmtree(str(root), ignore_errors=True)
+
+        train_pairs, missing = self._collect_pairs(self.trainset_dir, self.label_root)
+        if not train_pairs:
+            raise FileNotFoundError(
+                f"❌ 在 {self.trainset_dir} 与 {self.label_root} 之间配不出任何"
+                f"「图像 + 同名 .txt」组合，无法训练。请确认标签文件名与图像同名。")
+
+        # 固定种子划分，保证同一数据集多次训练的 train/val 完全一致、结果可复现
+        rng = random.Random(self.seed)
+        order = list(range(len(train_pairs)))
+        rng.shuffle(order)
+        n_val = 0
+        if len(train_pairs) >= 2 and self.val_ratio > 0:
+            n_val = max(1, round(len(train_pairs) * self.val_ratio))
+            n_val = min(n_val, len(train_pairs) - 1)   # 至少留 1 张给 train
+        val_idx = set(order[:n_val])
+
+        stats = {"n_train": 0, "n_val": 0, "n_test": 0, "missing_train_labels": missing}
+        for i, (img, lab) in enumerate(train_pairs):
+            split = "val" if i in val_idx else "train"
+            self._link_or_copy(img, root / "images" / split / img.name)
+            self._link_or_copy(lab, root / "labels" / split / lab.name)
+            stats["n_train" if split == "train" else "n_val"] += 1
+
+        # test 仅在有标签时才建：指向无标签目录会产出全 0 的假测试指标
+        stats["missing_test_labels"] = []
+        if self.test_label_root is not None:
+            test_pairs, test_missing = self._collect_pairs(self.testset_dir, self.test_label_root)
+            stats["missing_test_labels"] = test_missing
+            for img, lab in test_pairs:
+                self._link_or_copy(img, root / "images" / "test" / img.name)
+                self._link_or_copy(lab, root / "labels" / "test" / lab.name)
+            stats["n_test"] = len(test_pairs)
+
+        return root, stats
+
+    def _build_dataset_yaml(self, dataset_root: Path, has_test: bool):
+        """生成 data.yaml 内容。path 用绝对路径，不受运行时 CWD 影响。"""
         names_lines = "\n".join(
             f"  {i}: {name}" for i, name in self.CLASS_NAMES.items()
         )
-        yaml_content = f"""
-path: {self.data_root.resolve()}
-train: trainset
-val: trainset
-test: testset
+        test_line = "\ntest: images/test" if has_test else ""
+        return f"""path: {dataset_root.resolve()}
+train: images/train
+val: images/val{test_line}
 
 nc: {self.num_classes}
 names:
 {names_lines}
-"""
-        return yaml_content.strip()
+""".strip()
     
     def _save_training_log(self):
         """保存训练日志"""

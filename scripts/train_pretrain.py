@@ -17,7 +17,8 @@ train_pretrain.py — 在云端 GPU 上用 pretrain/ 数据集对 YOLOv8 做域�
 
 参数:
     --data       pretrain/data.yaml 路径（默认自动查找）
-    --model      初始权重（默认 yolov8n.pt，可换 yolov8s.pt）
+    --model      初始权重（默认 yolov8n.pt，仓库里只随附这一个；
+                 换别的如 yolov8s.pt 会由 ultralytics 首次使用时联网下载）
     --epochs     训练轮数（smoke 模式固定 2）
     --batch      批次大小（smoke 模式固定 8）
     --imgsz      输入尺寸（smoke 模式固定 320）
@@ -35,6 +36,16 @@ from pathlib import Path
 # Anaconda 的 MKL 与 torch 各带一份 libiomp5md.dll，冲突会直接中止训练；
 # 允许重复加载同一 OpenMP 运行时（二者同源，功能一致）。
 os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
+
+# 直接以 `python scripts/train_pretrain.py` 运行时 sys.path[0] 是 scripts/
+_REPO_ROOT = str(Path(__file__).resolve().parents[1])
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
+
+# 本脚本会 print ✓，Windows GBK 控制台/管道下会抛 UnicodeEncodeError
+from dental_common import force_utf8_stdio
+
+force_utf8_stdio()
 
 try:
     from ultralytics import YOLO

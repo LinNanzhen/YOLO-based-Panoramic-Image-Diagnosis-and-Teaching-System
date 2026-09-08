@@ -8,7 +8,8 @@ import cv2
 import streamlit as st
 from PIL import Image
 
-from ui_common import get_best_weights, upload_with_preview
+from ui_common import (DEFAULT_DETECT_RUNS_DIR, get_best_weights, show_image,
+                       upload_with_preview)
 
 
 def render():
@@ -25,7 +26,7 @@ def render():
 
     output_dir_scan = st.text_input(
         "📂 权重搜索目录",
-        value="./runs/detect/results",
+        value=str(DEFAULT_DETECT_RUNS_DIR),
         key="infer_root"
     )
 
@@ -125,7 +126,7 @@ def render():
                                 "confidence": confidence
                             })
 
-                        st.image(img_cv, caption="🎯 AI 标注结果", use_container_width=True)
+                        show_image(img_cv, caption="🎯 AI 标注结果")
 
                         if detections:
                             st.success(f"✅ 检测到 {len(detections)} 处异常")

@@ -21,11 +21,12 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-import page_diagnose  # noqa: E402
-import page_monitor   # noqa: E402
-import page_train     # noqa: E402  （导入时会检查核心模块 dental_yolo_train 是否存在）
-import page_winter    # noqa: E402
-import ui_common      # noqa: E402
+import page_diagnose   # noqa: E402
+import page_monitor    # noqa: E402
+import page_train      # noqa: E402  （导入时会检查核心模块 dental_yolo_train 是否存在）
+import page_winter     # noqa: E402
+import page_winter_train  # noqa: E402
+import ui_common       # noqa: E402
 
 # ==================== 全局样式 ====================
 ui_common.render_css()
@@ -48,10 +49,14 @@ with st.sidebar:
 
     st.markdown("---")
 
+    # 供其他页面程序化跳转（如 Winter 微调完成后自动切到诊断页）
+    if "nav_page" not in st.session_state:
+        st.session_state["nav_page"] = "🚀 模型训练"
+
     page = st.radio(
         "📍 功能导航",
-        ["🚀 模型训练", "📊 训练监控", "👁️ 智能诊断", "🦷 Winter 教学诊断"],
-        index=0
+        ["🚀 模型训练", "📊 训练监控", "🧪 Winter 微调", "👁️ 智能诊断", "🦷 Winter 教学诊断"],
+        key="nav_page",
     )
 
     st.markdown("---")
@@ -106,12 +111,15 @@ if 'class_names' not in st.session_state:
     st.session_state.class_names = ['Caries', 'Restoration', 'Impacted tooth']  # 疾病类别
 if 'winter_result' not in st.session_state:
     st.session_state.winter_result = None        # Winter 页的 (标注图, 智齿列表)
+if 'winter_model_selection' not in st.session_state:
+    st.session_state.winter_model_selection = None  # Winter 诊断页当前使用的实验名
 
 
 # ==================== 页面路由 ====================
 PAGES = {
     "🚀 模型训练": page_train.render,
     "📊 训练监控": page_monitor.render,
+    "🧪 Winter 微调": page_winter_train.render,
     "👁️ 智能诊断": page_diagnose.render,
     "🦷 Winter 教学诊断": page_winter.render,
 }

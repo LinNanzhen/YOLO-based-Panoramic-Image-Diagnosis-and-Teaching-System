@@ -8,12 +8,43 @@ from pathlib import Path
 
 import streamlit as st
 
+from dental_common import REPO_ROOT, RUNS_DIR
+from ui_common import DEFAULT_DETECT_RUNS_DIR, show_image
+
 # 导入即做核心模块存在性检查（本模块在 web_ui.py 启动时被导入，相当于启动门禁）
 try:
     from dental_yolo_train import DentalYOLOPipeline
 except ImportError:
     st.error("❌ 未找到核心模块，请确保 'dental_yolo_train.py' 与页面文件在同一目录下。")
     st.stop()
+
+
+def _safe_extractall(zip_file, extract_to) -> None:
+    """解压 ZIP，逐个成员校验目标路径落在 extract_to 内，越界即拒绝。
+
+    注意这里修的不是"任意文件写入"漏洞：实测（Python 3.11.7）CPython 的
+    `zipfile.extractall` 本身就会中和经典 Zip Slip —— 成员名里的 `../` 组件被
+    剥掉、绝对路径降级为目标目录内的相对路径、symlink 成员被当普通文件写入。
+
+    真正改善的是失败方式：stdlib 是**静默改写后照常解压**，用户上传一个畸形
+    ZIP 会得到一份路径被悄悄改过的残缺数据集（例如 `../../labels/` 里的标签
+    被平铺到根），页面只报"图片与标签不配对"，看不出根因。改成显式拒绝并
+    指出是哪个成员，问题当场可见。symlink 检查同理，属防御性冗余。
+    """
+    base = Path(extract_to).resolve()
+    base.mkdir(parents=True, exist_ok=True)
+
+    with zipfile.ZipFile(zip_file) as zf:
+        for info in zf.infolist():
+            # 0o120000 = S_IFLNK，zip 外部属性的高 16 位是 Unix mode
+            if (info.external_attr >> 16) & 0o170000 == 0o120000:
+                raise ValueError(f"ZIP 含符号链接成员，已拒绝解压: {info.filename}")
+
+            target = (base / info.filename).resolve()
+            if target != base and not target.is_relative_to(base):
+                raise ValueError(f"ZIP 成员路径越界，已拒绝解压: {info.filename}")
+
+        zf.extractall(str(base))
 
 
 def extract_and_detect_dataset(zip_file, extract_to: str) -> dict:
@@ -40,9 +71,8 @@ def extract_and_detect_dataset(zip_file, extract_to: str) -> dict:
     extract_path = Path(extract_to)
     extract_path.mkdir(parents=True, exist_ok=True)
 
-    # 解压
-    with zipfile.ZipFile(zip_file) as zf:
-        zf.extractall(str(extract_path))
+    # 解压（成员路径已校验，防止 ../ 越界写文件）
+    _safe_extractall(zip_file, extract_path)
 
     # 如果 zip 内部只有一个顶层文件夹，进入它
     top_items = [d for d in extract_path.iterdir() if d.is_dir()]
@@ -146,8 +176,8 @@ def extract_labels_zip(zip_file, extract_to: str) -> dict:
     extract_path = Path(extract_to)
     extract_path.mkdir(parents=True, exist_ok=True)
 
-    with zipfile.ZipFile(zip_file) as zf:
-        zf.extractall(str(extract_path))
+    # 解压（成员路径已校验，防止 ../ 越界写文件）
+    _safe_extractall(zip_file, extract_path)
 
     # 如果 zip 内部只有一个顶层文件夹，进入它
     top_items = [d for d in extract_path.iterdir() if d.is_dir()]
@@ -436,11 +466,16 @@ def render():
     else:
         st.markdown("适用于数据集（图像和标签）已存在于服务器上的情况。")
         local_data_root  = st.text_input("📁 图像根目录（含 trainset/ 和 testset/）",
-                                         value="./images",
-                                         key="local_data_root")
+                                         value="",
+                                         key="local_data_root",
+                                         help="本页是龋齿/充填体/阻生牙三分类，仓库未附带与之配对的样例数据。"
+                                              "请填自己的图片目录（如 `dataset/images` 或任意路径）。")
         local_label_root = st.text_input("🏷️ 标签目录（直接含 .txt 文件）",
-                                         value="./labels/trainset",
-                                         key="local_label_root")
+                                         value="",
+                                         key="local_label_root",
+                                         help="本页是龋齿/充填体/阻生牙三分类，仓库未附带与之配对的样例标签"
+                                              "（dataset/labels/trainset 是 Winter 五类角度标签，类别 ID 与本页不符）。"
+                                              "请填自己的标签目录。")
 
     st.markdown('</div>', unsafe_allow_html=True)
 
@@ -453,7 +488,9 @@ def render():
 
         output_dir = st.text_input(
             "💾 结果输出目录",
-            value="./results"
+            value=str(DEFAULT_DETECT_RUNS_DIR),
+            help="与「📊 训练监控」「👁️ 智能诊断」两页扫描的目录一致，"
+                 "训练完可直接切过去看曲线、选权重。"
         )
 
         st.markdown("---")
@@ -509,15 +546,15 @@ def render():
                      "预训练方法见 scripts/train_pretrain.py"
             )
             if pretrain_source == "官方 COCO 权重":
-                pretrained_path = f"yolov8{model_size[0]}.pt"
+                pretrained_path = str(REPO_ROOT / f"yolov8{model_size[0]}.pt")
             elif pretrain_source == "域内预训练 (pretrain 数据集)":
-                pretrained_path = "runs/pretrain/weights/best.pt"
+                pretrained_path = str(RUNS_DIR / "pretrain" / "weights" / "best.pt")
                 if not os.path.exists(pretrained_path):
                     st.warning("⚠️ 未找到预训练权重，请先在云端运行 scripts/train_pretrain.py 生成")
             else:
                 pretrained_path = st.text_input(
                     "📁 权重文件路径",
-                    value="runs/pretrain/weights/best.pt",
+                    value=str(RUNS_DIR / "pretrain" / "weights" / "best.pt"),
                     help="填写权重文件路径，如 runs/pretrain/weights/best.pt"
                 )
                 if pretrained_path and not os.path.exists(pretrained_path):
@@ -547,22 +584,26 @@ def render():
 
         if start_btn:
             # 确定数据集路径来源
+            test_label_root = None
             if data_mode.startswith("🖼️"):
-                data_root  = st.session_state.get("split_data_root", "./images")
+                data_root  = st.session_state.get("split_data_root") or str(REPO_ROOT / "images")
                 label_root = st.session_state.label_zip_label_root
+                # 只有这个模式的 ZIP 解析结果里带测试集标签目录
+                info = st.session_state.get("label_zip_info") or {}
+                test_label_root = info.get("test_label_root")
                 src_tag    = "服务器图像 + 上传标签"
             elif data_mode.startswith("📤"):
                 data_root  = st.session_state.upload_data_root
                 label_root = st.session_state.upload_label_root
                 src_tag    = "上传数据集"
             else:
-                data_root  = st.session_state.get("local_data_root", "./images")
-                label_root = st.session_state.get("local_label_root", "./labels/trainset")
+                data_root  = st.session_state.get("local_data_root") or ""
+                label_root = st.session_state.get("local_label_root") or ""
                 src_tag    = "服务器路径"
 
             try:
-                if data_root is None or label_root is None:
-                    st.error("❌ 数据集未就绪，请先在上方「数据集配置」中完成图像路径填写或 ZIP 上传")
+                if not data_root or not label_root:
+                    st.error("❌ 数据集未就绪，请先在上方「数据集配置」中填写图像与标签目录路径")
                 elif not os.path.exists(data_root) or not os.path.exists(label_root):
                     st.error(f"❌ 目录不存在，请检查路径！\n- 图像: `{data_root}`\n- 标签: `{label_root}`")
                 else:
@@ -575,7 +616,8 @@ def render():
                             output_dir=output_dir,
                             model_size=model_size,
                             pretrained_weights=pretrained_path if use_pretrained else None,
-                            class_names=st.session_state.class_names
+                            class_names=st.session_state.class_names,
+                            test_label_root=test_label_root
                         )
 
                     st.success("✅ 模型初始化完成！")
@@ -600,11 +642,11 @@ def render():
 
                     res_img = results_dir / "results.png"
                     if res_img.exists():
-                        st.image(str(res_img), caption="训练指标曲线", use_container_width=True)
+                        show_image(str(res_img), caption="训练指标曲线")
 
                     cm_img = results_dir / "confusion_matrix.png"
                     if cm_img.exists():
-                        st.image(str(cm_img), caption="混淆矩阵", use_container_width=True)
+                        show_image(str(cm_img), caption="混淆矩阵")
 
                     st.success(f"✅ 训练完成！权重保存至: `{results_dir}`")
 

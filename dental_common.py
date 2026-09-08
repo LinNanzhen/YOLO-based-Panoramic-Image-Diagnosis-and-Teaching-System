@@ -7,17 +7,90 @@ Winter 五类角度的中文名/颜色常量，以及"检测 → 逐框裁切 �
 web_ui 与 scripts/predict_demo.py、scripts/auto_annotate.py 都从这里导入，
 调整绘制样式只需改这一处。
 
-注意：导入本模块即设置 KMP_DUPLICATE_LIB_OK —— Anaconda 的 MKL 与 torch 各带
-一份 libiomp5md.dll，不设此变量会直接报 `OMP: Error #15` 中止进程。
-依赖 torch 的入口应先 import 本模块，再 import ultralytics/torch。
+注意：导入本模块会做两件进程级修复 —— ① 设置 KMP_DUPLICATE_LIB_OK（Anaconda 的
+MKL 与 torch 各带一份 libiomp5md.dll，不设会直接报 `OMP: Error #15` 中止进程）；
+② 把 stdout/stderr 切到 UTF-8（Windows GBK 控制台下 print ✓/⚠ 会抛
+UnicodeEncodeError）。依赖 torch 的入口应先 import 本模块，再 import ultralytics/torch。
 """
+import contextlib
 import os
+import sys
 
 os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
+
+
+def force_utf8_stdio():
+    """把 stdout/stderr 切到 UTF-8，终端不支持时退化为占位符而不是崩。
+
+    Windows 控制台与重定向管道默认用 GBK，而本项目从训练库深处就会 print
+    ⚠ ✓ 🦷 之类字符（例如 scripts/prepare_winter_dataset.py 的数据集告警），
+    一旦编码不了就抛 UnicodeEncodeError —— 在页面的训练线程里表现为一个和训练
+    本身毫无关系的编码报错，极难联想到根因。
+
+    run.py 已为自己处理过，但文档里的另一种启动方式 `streamlit run web_ui.py`
+    不经过 run.py；web_ui 会导入各页面模块，页面模块都导入本模块，所以放这里
+    能一次覆盖两种启动路径。
+
+    同时打开行缓冲：训练进度是从这里 print 到服务进程的 stdout 的，
+    `streamlit run web_ui.py > log` 这种起法下块缓冲会让日志一直空着。
+    """
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is None:      # 被 pytest/Streamlit 替换过的流没有该方法
+            continue
+        try:
+            reconfigure(encoding="utf-8", errors="replace", line_buffering=True)
+        except (ValueError, OSError):
+            pass
+
+
+force_utf8_stdio()
+
+from pathlib import Path
 
 import cv2
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
+
+# ---------- 仓库路径基准 ----------
+# 由本文件位置推导，与进程 CWD 无关。所有仓库内资源路径都应基于它拼接，
+# 否则 streamlit 从别的目录启动时 "runs/winter" 之类的相对路径会全部落空。
+REPO_ROOT = Path(__file__).resolve().parent
+RUNS_DIR = REPO_ROOT / "runs"
+WINTER_RUNS_DIR = RUNS_DIR / "winter"
+DEMO_WEIGHTS_DIR = REPO_ROOT / "weights" / "demo"
+
+
+@contextlib.contextmanager
+def preserve_cuda_visible_devices():
+    """把一次 ultralytics 调用对 CUDA_VISIBLE_DEVICES 的改动限制在这次调用内。
+
+    ultralytics 的 select_device 在 device="cpu" 时会写
+    `os.environ["CUDA_VISIBLE_DEVICES"] = ""`（源码注释：force is_available()=False）。
+    但实测 torch 2.7.1 上这个 "force" 并不成立：`is_available()` 走 CUDA Runtime API
+    （初始化时读一次，此后恒为 True），而 `device_count()` 走 NVML（CUDA 初始化前每次
+    都重读环境变量，此时返回 0；初始化后才缓存进 `_cached_device_count`）。两者互相
+    矛盾，于是 select_device 判定"有 GPU"进入 CUDA 分支，再调 `get_gpu_info(0)` →
+    `get_device_properties(0)`，因 `0 >= device_count()` 抛
+    `AssertionError: Invalid device id`。
+
+    后果是同一进程内后续所有默认设备的推理全部失败，页面只显示"检测推理失败:
+    Invalid device id"。课堂文档路径「无 GPU 时用 CPU 微调 → 跳诊断页看图」正好
+    踩中：训练与推理在同一个 Streamlit 进程里。
+
+    恢复环境变量即可让两者重新一致（已实测 device_count 回到 1，无需重启进程），
+    所以在每次调用前后保存/恢复就能断开这条因果链。
+    """
+    key = "CUDA_VISIBLE_DEVICES"
+    missing = object()
+    saved = os.environ.get(key, missing)
+    try:
+        yield
+    finally:
+        if saved is missing:
+            os.environ.pop(key, None)
+        else:
+            os.environ[key] = saved
 
 # ---------- Winter 阻生角度常量 ----------
 WINTER_ANGLE_ZH = {
@@ -132,7 +205,8 @@ def detect_and_classify(det, clf, source, crop_img=None, conf: float = 0.25,
         det_kw["device"] = device
         clf_kw["device"] = device
 
-    r = det.predict(source, **det_kw)[0]
+    with preserve_cuda_visible_devices():
+        r = det.predict(source, **det_kw)[0]
     h, w = r.orig_shape
     boxes = r.boxes
     order = range(len(boxes))
@@ -151,7 +225,8 @@ def detect_and_classify(det, clf, source, crop_img=None, conf: float = 0.25,
             else:
                 crop = crop_img.crop((cx0, cy0, cx1, cy1))
             try:
-                probs = clf.predict(crop, **clf_kw)[0].probs
+                with preserve_cuda_visible_devices():
+                    probs = clf.predict(crop, **clf_kw)[0].probs
                 angle_en = clf.names[int(probs.top1)]
                 angle_conf = float(probs.top1conf)
             except Exception:

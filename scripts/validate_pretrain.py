@@ -11,9 +11,9 @@ validate_pretrain.py — 校验 pretrain/ 数据集完整性与标签格式（�
    - 同一文件内 框行 与 多边形行 混用（ultralytics 会视为损坏）-> 警告
 3. 每类实例数、多边形点数、框面积统计
 4. 图片可打开（PIL verify）
-5. 与用户自有图片（默认 images/trainset + images/testset）做 MD5 查重
+5. 与用户自有图片（默认 dataset/images，含 trainset/testset 子目录）做 MD5 查重
 
-用法: python scripts/validate_pretrain.py [--pretrain-dir pretrain] [--user-dir images]
+用法: python scripts/validate_pretrain.py [--pretrain-dir pretrain] [--user-dir dataset/images]
 输出: 校验报告（发现问题返回退出码 1）
 """
 import argparse
@@ -66,7 +66,8 @@ def parse_yaml_names(yaml_path: Path) -> list[str]:
 def main() -> int:
     ap = argparse.ArgumentParser(description="校验 pretrain 数据集")
     ap.add_argument("--pretrain-dir", default="pretrain", help="pretrain 数据集根目录")
-    ap.add_argument("--user-dir", default="images", help="用户自有图片目录（查重用），可不存在")
+    ap.add_argument("--user-dir", default="dataset/images",
+                    help="用户自有图片目录（查重用，递归子目录），可不存在")
     args = ap.parse_args()
 
     root = Path(args.pretrain_dir).resolve()

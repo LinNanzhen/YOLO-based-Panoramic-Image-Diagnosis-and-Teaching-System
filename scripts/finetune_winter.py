@@ -32,12 +32,27 @@ from pathlib import Path
 # Anaconda 的 MKL 与 torch 各带一份 libiomp5md.dll，冲突会直接中止训练。
 os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
 
+# 由脚本位置推导，与 CWD 无关：scripts/ 的上一级即仓库根目录
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
 try:
     from ultralytics import YOLO
 except ImportError as e:
     sys.exit(f"[错误] 缺少 ultralytics: {e}")
 
+# device=cpu 时 ultralytics 会把 CUDA_VISIBLE_DEVICES 写成 ""，不还原的话
+# 同一进程（Web 页面）后续的 GPU 推理会全部报 Invalid device id
+from dental_common import preserve_cuda_visible_devices
+
 DIMS = ["relation", "position", "angulation"]
+
+
+def repo_path(p) -> Path:
+    """仓库相对路径 -> 绝对路径；已是绝对路径则原样返回。"""
+    q = Path(p)
+    return q if q.is_absolute() else REPO_ROOT / q
 
 
 def run_detect(args) -> dict:
@@ -49,24 +64,26 @@ def run_detect(args) -> dict:
         if not Path(weights).is_file():
             sys.exit(f"[错误] 预训练权重不存在: {weights}（先运行 train_pretrain.py）")
     else:
-        weights = f"yolov8{args.model_size[0]}.pt"
+        weights = str(repo_path(f"yolov8{args.model_size[0]}.pt"))
     print(f"[检测] 初始权重: {weights}")
     model = YOLO(weights)
-    results = model.train(
-        data=str(data_yaml),
-        epochs=args.epochs,
-        batch=args.batch,
-        imgsz=args.imgsz,
-        lr0=args.lr0,
-        patience=args.patience,
-        device=args.device,
-        project=str(args.project),
-        name=f"{args.exp}-detect",
-        exist_ok=True,
-    )
-    # 用 val 集（或 test 集，若 data.yaml 配置了 test）做评估
-    val = model.val(data=str(data_yaml), split="test" if data_yaml_test(data_yaml) else "val",
-                    device=args.device, verbose=False)
+    with preserve_cuda_visible_devices():
+        results = model.train(
+            data=str(data_yaml),
+            epochs=args.epochs,
+            batch=args.batch,
+            imgsz=args.imgsz,
+            lr0=args.lr0,
+            patience=args.patience,
+            device=args.device,
+            project=str(args.project),
+            name=f"{args.exp}-detect",
+            exist_ok=True,
+        )
+        # 用 val 集（或 test 集，若 data.yaml 配置了 test）做评估
+        val = model.val(data=str(data_yaml),
+                        split="test" if data_yaml_test(data_yaml) else "val",
+                        device=args.device, verbose=False)
     metrics = {
         "init": args.init,
         "mAP50": float(val.box.map50),
@@ -85,16 +102,24 @@ def data_yaml_test(data_yaml: Path) -> bool:
 
 def build_cls_model(args):
     """构建 YOLO-cls 模型：优先域内预训练骨干，其次本地 COCO 分类权重，最后随机初始化（离线兜底）。"""
+    size = args.model_size[0]
     if args.init == "pretrain" and Path(args.weights).is_file():
         print(f"[分类] 用域内预训练骨干初始化: {args.weights}")
-        model = YOLO(f"yolov8{args.model_size[0]}-cls.yaml")
-        model.load(args.weights)  # strict=False，只迁移骨干/颈部共同层
+        model = YOLO(f"yolov8{size}-cls.yaml")
+        model.load(str(args.weights))  # strict=False，只迁移骨干/颈部共同层
         return model
-    w = Path(f"yolov8{args.model_size[0]}-cls.pt")
-    if w.exists():
+    w = repo_path(f"yolov8{size}-cls.pt")
+    if w.is_file():
+        print(f"[分类] 初始权重（COCO）: {w}")
         return YOLO(str(w))
-    print(f"[分类] {w} 不存在（离线环境无法下载），改为随机初始化从零训练")
-    return YOLO(f"yolov8{args.model_size[0]}-cls.yaml")
+    print("!" * 60)
+    print(f"[分类] 警告：未找到 COCO 分类权重 {w}")
+    print("       将改为随机初始化从零训练 —— 小数据下 top1 通常会明显偏低，")
+    print("       这不代表你的标注或数据有问题。")
+    print("       要恢复正常效果，联网执行一次即可（会下载到当前目录）：")
+    print(f"         python -c \"from ultralytics import YOLO; YOLO('yolov8{size}-cls.pt')\"")
+    print("!" * 60)
+    return YOLO(f"yolov8{size}-cls.yaml")
 
 
 def run_cls(args) -> dict:
@@ -109,19 +134,20 @@ def run_cls(args) -> dict:
             continue
         print(f"[分类] {dim}: 训练 YOLO-cls（{args.model_size}）...")
         model = build_cls_model(args)
-        model.train(
-            data=str(dim_dir),
-            epochs=args.cls_epochs,
-            batch=args.cls_batch,
-            imgsz=args.cls_imgsz,
-            lr0=args.cls_lr0,
-            patience=args.cls_patience,
-            device=args.device,
-            project=str(args.project),
-            name=f"{args.exp}-cls-{dim}",
-            exist_ok=True,
-        )
-        val = model.val(device=args.device, verbose=False)
+        with preserve_cuda_visible_devices():
+            model.train(
+                data=str(dim_dir),
+                epochs=args.cls_epochs,
+                batch=args.cls_batch,
+                imgsz=args.cls_imgsz,
+                lr0=args.cls_lr0,
+                patience=args.cls_patience,
+                device=args.device,
+                project=str(args.project),
+                name=f"{args.exp}-cls-{dim}",
+                exist_ok=True,
+            )
+            val = model.val(device=args.device, verbose=False)
         top1 = float(val.top1)
         top5 = float(val.top5)
         cm = val.confusion_matrix.matrix if getattr(val, "confusion_matrix", None) else None
@@ -183,6 +209,10 @@ def main() -> int:
     ap.add_argument("--compare-with", default=None, help="对比实验的 metrics.json 路径")
     args = ap.parse_args()
     args.exp = args.exp or f"exp-{args.init}"
+
+    # 默认值都是仓库相对路径，统一解析成绝对路径，避免受运行时 CWD 影响
+    for attr in ("data", "cls_root", "weights", "project"):
+        setattr(args, attr, str(repo_path(getattr(args, attr))))
 
     metrics = {}
     if args.mode in ("detect", "all"):

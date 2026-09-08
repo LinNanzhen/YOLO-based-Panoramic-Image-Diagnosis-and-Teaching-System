@@ -8,7 +8,7 @@ X-AnyLabeling 中导入这些预标注，只需校正框的位置并把每颗智
 组合类别选好，工作量大幅下降。
 
 用法:
-    python scripts/auto_annotate.py --images images/trainset \
+    python scripts/auto_annotate.py --images dataset/images/trainset \
         --weights runs/pretrain/weights/best.pt --out annotated_presets
 
     python scripts/auto_annotate.py --images <更多未标注片目录> \

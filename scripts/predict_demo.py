@@ -27,14 +27,29 @@ from ultralytics import YOLO  # noqa: E402
 IMG_SUFFIXES = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff"}
 
 
+def _demo_weight(kind: str) -> str:
+    """expB 演示权重路径：优先本机训练产物 runs/winter，回落到随仓库提交的 weights/demo。
+
+    runs/ 被 .gitignore，新克隆的仓库里只有 weights/demo 这一份，
+    写死任一侧都会让另一侧的环境直接报"权重不存在"。
+    """
+    rel = f"expB-{kind}/weights/best.pt"
+    for root in (dc.WINTER_RUNS_DIR, dc.DEMO_WEIGHTS_DIR):
+        cand = root / rel
+        if cand.is_file():
+            return str(cand)
+    return str(dc.WINTER_RUNS_DIR / rel)   # 都不存在时给出主路径，便于报错定位
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="智齿检测+角度分类推理可视化")
     ap.add_argument("--images", required=True, help="图片目录或单张图片路径")
-    ap.add_argument("--det", default="runs/winter/expB-detect/weights/best.pt", help="检测权重")
-    ap.add_argument("--cls", default="runs/winter/expB-cls-angulation/weights/best.pt",
-                    help="角度分类权重（可省略只画检测框）")
+    ap.add_argument("--det", default=_demo_weight("detect"),
+                    help="检测权重（默认 expB：runs/winter 优先，缺失则用内置 weights/demo）")
+    ap.add_argument("--cls", default=_demo_weight("cls-angulation"),
+                    help="角度分类权重（同上；可省略只画检测框）")
     ap.add_argument("--labels", default=None, help="可选：YOLO 标签目录，画真实标注框做对比")
-    ap.add_argument("--out", default="runs/demo_predictions")
+    ap.add_argument("--out", default=str(dc.RUNS_DIR / "demo_predictions"))
     ap.add_argument("--conf", type=float, default=0.25)
     ap.add_argument("--margin", type=float, default=0.2)
     ap.add_argument("--device", default="0")

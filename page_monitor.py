@@ -6,7 +6,7 @@ from pathlib import Path
 import plotly.graph_objects as go
 import streamlit as st
 
-from ui_common import find_all_runs, load_training_metrics
+from ui_common import DEFAULT_DETECT_RUNS_DIR, find_all_runs, load_training_metrics
 
 
 def render():
@@ -22,7 +22,7 @@ def render():
     with col_config:
         results_dir = st.text_input(
             "📂 训练结果目录",
-            value="./runs/detect/results",
+            value=str(DEFAULT_DETECT_RUNS_DIR),
             key="monitor_dir"
         )
     with col_refresh:
@@ -66,9 +66,9 @@ def render():
             2. 训练还在进行中，尚未生成 `results.csv`
             3. 目录路径不正确
 
-            **YOLO 训练输出结构**：
+            **YOLO 训练输出结构**（相对仓库根目录）：
             ```
-            ./runs/detect/results/
+            runs/detect/results/
             └── run_20241201_120000/   ← YOLO save_dir
                 ├── results.csv        ← 训练曲线数据
                 └── weights/

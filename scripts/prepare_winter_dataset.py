@@ -34,6 +34,9 @@ prepare_winter_dataset.py — 把 Winter 标注整理为可训练的数据集
     --seed        随机种子（默认 42）
     --margin      裁切外扩比例（默认 0.2，即每边扩 20%）
     --test-images / --test-labels   可选：独立测试集（不参与训练/验证）
+
+本模块同时是可导入的库：build_winter_dataset() 供 Web 页面/其他脚本直接调用
+（不经过 argparse），出错统一抛 ValueError（中文消息）。
 """
 import argparse
 import json
@@ -42,8 +45,19 @@ import sys
 from collections import Counter
 from pathlib import Path
 
+# 以 `python scripts/prepare_winter_dataset.py` 直接运行时 sys.path[0] 是 scripts/，
+# 需要把仓库根目录加进来才能 import dental_common（与 scripts/predict_demo.py 同一套做法）
+_REPO_ROOT = str(Path(__file__).resolve().parents[1])
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
+
 import numpy as np
 from PIL import Image
+
+# 本脚本会 print ⚠ ✓，Windows GBK 控制台/管道下会抛 UnicodeEncodeError
+from dental_common import force_utf8_stdio
+
+force_utf8_stdio()
 
 IMG_SUFFIXES = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff"}
 
@@ -72,14 +86,14 @@ def load_custom_combos(path: Path) -> dict[int, tuple[str, str, str, str]]:
             continue
         parts = [p.strip() for p in line.split(",")]
         if len(parts) != 4:
-            sys.exit(f"[错误] {path} 每行需 4 列 (combo_id,relation,position,angulation): {line}")
+            raise ValueError(f"{path} 每行需 4 列 (combo_id,relation,position,angulation): {line}")
         cid = int(parts[0])
         rel, pos, ang = parts[1], parts[2], parts[3]
         # relation/position 为 "-" 表示该维度未标注（如只标角度），组合名直接取角度
         name = ang if rel == "-" and pos == "-" else f"{rel}-{pos}-{ang}"
         combos[cid] = (name, rel, pos, ang)
     if not combos:
-        sys.exit(f"[错误] 未从 {path} 解析到任何组合")
+        raise ValueError(f"未从 {path} 解析到任何组合")
     return combos
 
 
@@ -92,10 +106,10 @@ def parse_label(lb_path: Path, combos: dict) -> list[tuple[int, float, float, fl
             continue
         vals = ln.split()
         if len(vals) != 5:
-            sys.exit(f"[错误] {lb_path}: 每行需 5 列 (class cx cy w h)，得到 {len(vals)} 列: {ln}")
+            raise ValueError(f"{lb_path}: 每行需 5 列 (class cx cy w h)，得到 {len(vals)} 列: {ln}")
         cid = int(float(vals[0]))
         if cid not in combos:
-            sys.exit(f"[错误] {lb_path}: 类别 ID {cid} 不在组合映射中（有效 ID: {sorted(combos)}）")
+            raise ValueError(f"{lb_path}: 类别 ID {cid} 不在组合映射中（有效 ID: {sorted(combos)}）")
         out.append((cid, *map(float, vals[1:])))
     return out
 
@@ -119,30 +133,47 @@ def safe_stem(name: str) -> str:
     return "".join(c if c.isalnum() else "_" for c in name)
 
 
-def main() -> int:
-    ap = argparse.ArgumentParser(description="整理 Winter 标注为训练数据集")
-    ap.add_argument("--images", required=True)
-    ap.add_argument("--labels", required=True)
-    ap.add_argument("--out", default="winter_dataset")
-    ap.add_argument("--combos", default=None, help="自定义组合 CSV")
-    ap.add_argument("--val-ratio", type=float, default=0.15)
-    ap.add_argument("--seed", type=int, default=42)
-    ap.add_argument("--margin", type=float, default=0.2)
-    ap.add_argument("--test-images", default=None)
-    ap.add_argument("--test-labels", default=None)
-    ap.add_argument("--dims", default="relation,position,angulation",
-                    help="要生成的分类维度，逗号分隔（默认三个维度；只标了角度可传 angulation）")
-    args = ap.parse_args()
-    dims = [d.strip() for d in args.dims.split(",") if d.strip()]
+def build_winter_dataset(
+    images_dir: str | Path,
+    labels_dir: str | Path,
+    out_dir: str | Path,
+    combos: dict | str | Path | None = None,
+    dims: tuple[str, ...] = ("relation", "position", "angulation"),
+    val_ratio: float = 0.15,
+    seed: int = 42,
+    margin: float = 0.2,
+    test_images: str | Path | None = None,
+    test_labels: str | Path | None = None,
+) -> dict:
+    """把 Winter 标注整理为可训练数据集（检测集 + 裁切分类集）。
+
+    参数:
+        images_dir/labels_dir  标注完成的图片/标签目录（各平铺 .jpg/.txt，按 stem 配对）
+        out_dir                输出目录（detect/ + cls/ + report.json ...）
+        combos                 组合映射 dict；None=默认 45 组合；str/Path=自定义 CSV
+        dims                   要生成分类维度，默认三个维度；只标角度可传 ("angulation",)
+        val_ratio              验证集比例（按图片划分）
+        seed/margin            随机种子 / 裁切外扩比例
+        test_images/test_labels 可选独立测试集目录
+
+    返回 report dict（与 report.json 同结构）。出错抛 ValueError（中文消息）。
+    """
+    # ---------- 组合空间 ----------
+    if combos is None:
+        combos_map = build_default_combos()
+    elif isinstance(combos, dict):
+        combos_map = combos
+    else:
+        combos_map = load_custom_combos(Path(combos))
+    print(f"[信息] 组合空间: {len(combos_map)} 个组合（ID 0-{len(combos_map)-1}）")
+
     invalid = set(dims) - {"relation", "position", "angulation"}
     if invalid:
-        sys.exit(f"[错误] 无效维度: {sorted(invalid)}（可选: relation,position,angulation）")
+        raise ValueError(f"无效维度: {sorted(invalid)}（可选: relation,position,angulation）")
 
-    img_dir, lb_dir = Path(args.images), Path(args.labels)
+    img_dir, lb_dir = Path(images_dir), Path(labels_dir)
     if not img_dir.is_dir() or not lb_dir.is_dir():
-        sys.exit(f"[错误] 图片/标签目录不存在: {img_dir}, {lb_dir}")
-    combos = load_custom_combos(Path(args.combos)) if args.combos else build_default_combos()
-    print(f"[信息] 组合空间: {len(combos)} 个组合（ID 0-{len(combos)-1}）")
+        raise ValueError(f"图片/标签目录不存在: {img_dir}, {lb_dir}")
 
     # 1. 读取全部标注
     entries = []  # (img_path, lb_path)
@@ -156,19 +187,23 @@ def main() -> int:
             missing.append(p.name)
     orphan = [p for s, p in lbs.items() if s not in {i.stem for i in imgs}]
     if missing or orphan:
-        sys.exit(f"[错误] 图片-标签不匹配: 缺标签 {len(missing)} 张 {missing[:5]}，孤儿标签 {len(orphan)} 个 {orphan[:5]}")
+        raise ValueError(
+            f"图片-标签不匹配: 缺标签 {len(missing)} 张 {missing[:5]}，"
+            f"孤儿标签 {len(orphan)} 个 {orphan[:5]}")
+    if not entries:
+        raise ValueError("没有找到任何 图片+标签 配对，请检查目录内容与文件名是否一致")
 
     # 2. 解析并切分（按图片划分，防裁切泄漏）
-    rng = np.random.default_rng(args.seed)
+    rng = np.random.default_rng(seed)
     perm = rng.permutation(len(entries))
-    n_val = max(1, round(len(entries) * args.val_ratio))
+    n_val = max(1, round(len(entries) * val_ratio))
     val_idx = set(perm[:n_val].tolist())
     splits = {"train": [], "val": []}
     for i, (img, lb) in enumerate(entries):
         splits["val" if i in val_idx else "train"].append((img, lb))
 
     # 3. 输出目录
-    out = Path(args.out)
+    out = Path(out_dir)
     for split in ("train", "val"):
         (out / "detect" / "images" / split).mkdir(parents=True, exist_ok=True)
         (out / "detect" / "labels" / split).mkdir(parents=True, exist_ok=True)
@@ -187,7 +222,7 @@ def main() -> int:
     def process(split: str, items: list, test_prefix: str = ""):
         nonlocal total_boxes
         for img_path, lb_path in items:
-            boxes = parse_label(lb_path, combos)
+            boxes = parse_label(lb_path, combos_map)
             try:
                 img = Image.open(img_path).convert("RGB")
             except Exception as e:
@@ -196,7 +231,7 @@ def main() -> int:
             shutil.copy2(img_path, out / "detect" / "images" / split / img_path.name)
             det_lines = []
             for box_idx, (cid, cx, cy, bw, bh) in enumerate(boxes):
-                name, rel, pos, ang = combos[cid]
+                name, rel, pos, ang = combos_map[cid]
                 det_lines.append(f"0 {cx:.6f} {cy:.6f} {bw:.6f} {bh:.6f}")
                 total_boxes += 1
                 by_combo[name] += 1
@@ -205,7 +240,7 @@ def main() -> int:
                 by_ang[ang] += 1
                 stem = safe_stem(f"{test_prefix}{img_path.stem}__{box_idx}")
                 try:
-                    crop = make_crop(img, (cx, cy, bw, bh), args.margin)
+                    crop = make_crop(img, (cx, cy, bw, bh), margin)
                 except ValueError as e:
                     warnings.append(f"{img_path.name} 框{box_idx} {e}，已跳过该裁切")
                 else:
@@ -228,14 +263,14 @@ def main() -> int:
     process("val", splits["val"])
 
     test_n = 0
-    if args.test_images and args.test_labels:
-        t_img, t_lb = Path(args.test_images), Path(args.test_labels)
+    if test_images and test_labels:
+        t_img, t_lb = Path(test_images), Path(test_labels)
         test_items = []
         for p in sorted(t_img.iterdir()):
             if p.suffix.lower() in IMG_SUFFIXES and (t_lb / (p.stem + ".txt")).exists():
                 test_items.append((p, t_lb / (p.stem + ".txt")))
         if not test_items:
-            sys.exit("[错误] 测试集目录中没有找到 图片+标签 配对")
+            raise ValueError("测试集目录中没有找到 图片+标签 配对")
         (out / "detect" / "images" / "test").mkdir(parents=True, exist_ok=True)
         (out / "detect" / "labels" / "test").mkdir(parents=True, exist_ok=True)
         for dim in dims:
@@ -257,7 +292,8 @@ def main() -> int:
 
     # 5. 标注工具类别清单（按 ID 顺序）
     (out / "class_list_for_xanylabeling.txt").write_text(
-        "\n".join(f"{cid}: {name}" for cid, (name, *_rest) in sorted(combos.items())), encoding="utf-8")
+        "\n".join(f"{cid}: {name}" for cid, (name, *_rest) in sorted(combos_map.items())),
+        encoding="utf-8")
 
     # 6. 元数据与报告
     import csv
@@ -280,7 +316,8 @@ def main() -> int:
         "by_angulation": dict(by_ang) if "angulation" in dims else None,
         "warnings": warnings,
     }
-    (out / "report.json").write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+    (out / "report.json").write_text(json.dumps(report, ensure_ascii=False, indent=2),
+                                     encoding="utf-8")
 
     # 7. 打印摘要
     print("\n" + "=" * 60)
@@ -302,6 +339,42 @@ def main() -> int:
     print("  分类: winter_dataset/cls/{relation,position,angulation}")
     print("  下一步: python scripts/finetune_winter.py --mode all --init pretrain "
           "--weights runs/pretrain/weights/best.pt")
+    return report
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description="整理 Winter 标注为训练数据集")
+    ap.add_argument("--images", required=True)
+    ap.add_argument("--labels", required=True)
+    ap.add_argument("--out", default="winter_dataset")
+    ap.add_argument("--combos", default=None, help="自定义组合 CSV")
+    ap.add_argument("--val-ratio", type=float, default=0.15)
+    ap.add_argument("--seed", type=int, default=42)
+    ap.add_argument("--margin", type=float, default=0.2)
+    ap.add_argument("--test-images", default=None)
+    ap.add_argument("--test-labels", default=None)
+    ap.add_argument("--dims", default="relation,position,angulation",
+                    help="要生成的分类维度，逗号分隔（默认三个维度；只标了角度可传 angulation）")
+    args = ap.parse_args()
+
+    try:
+        build_winter_dataset(
+            images_dir=args.images,
+            labels_dir=args.labels,
+            out_dir=args.out,
+            combos=args.combos,  # None=默认45组合；路径=自定义 CSV
+            dims=tuple(d.strip() for d in args.dims.split(",") if d.strip()),
+            val_ratio=args.val_ratio,
+            seed=args.seed,
+            margin=args.margin,
+            test_images=args.test_images,
+            test_labels=args.test_labels,
+        )
+    except ValueError as e:
+        msg = str(e)
+        if msg.startswith("[错误] "):  # 避免消息自带前缀时双重加前缀
+            msg = msg[len("[错误] "):]
+        sys.exit(f"[错误] {msg}")
     return 0
 
 
